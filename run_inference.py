@@ -6,71 +6,69 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# Define the MeshToImageNN class if not already defined
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import matplotlib.pyplot as plt
+
 class MeshToImageNN(nn.Module):
-    def __init__(self):
+    def __init__(self, max_vertices=17664, max_points=20000):
         super(MeshToImageNN, self).__init__()
-        self.fc1 = nn.Linear(17664 * 3, 4096)
+        self.max_vertices = max_vertices
+        self.max_points = max_points
+        self.fc1 = nn.Linear(max_vertices * 3, 4096)
         self.fc2 = nn.Linear(4096, 1024)
-        self.fc3 = nn.Linear(1024, 256 * 256)
+        self.fc3 = nn.Linear(1024, max_points * 2)
         
     def forward(self, x):
-        x = x.view(-1, 17664 * 3)
+        x = x.view(-1, self.max_vertices * 3)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
-        x = x.view(-1, 1, 256, 256)
+        x = x.view(-1, self.max_points, 2)
         return x
 
-# Load the trained model
-model = MeshToImageNN()
-state_dict = torch.load('trained_projection_model.pth')
-from collections import OrderedDict
-new_state_dict = OrderedDict()
-for k, v in state_dict.items():
-    name = k[7:] if k.startswith('module.') else k  # remove `module.` prefix if present
-    new_state_dict[name] = v
-model.load_state_dict(new_state_dict)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = MeshToImageNN().to(device)
 
+if torch.cuda.device_count() > 1:
+    model = nn.DataParallel(model)
+
+# Load the trained model for inference
+model = MeshToImageNN().to(device)
+model.load_state_dict(torch.load('mesh_to_image_model.pth'))
 model.eval()
 
-model.eval()
+# Load the test mesh
+test_mesh_path = 'Test Set/3D files/toilet_0443.off'
+test_mesh = trimesh.load(test_mesh_path)
+vertices = np.array(test_mesh.vertices, dtype=np.float32)
 
-# Load and preprocess the new .off file
-def preprocess_off_file(file_path):
-    mesh = trimesh.load(file_path)
-    vertices = np.array(mesh.vertices, dtype=np.float32)
-    
-    # Pad or truncate vertices to ensure consistent tensor size
-    if vertices.shape[0] > 17664:
-        vertices = vertices[:17664]
-    else:
-        vertices = np.pad(vertices, ((0, 17664 - vertices.shape[0]), (0, 0)), 'constant')
-    
-    vertices = torch.tensor(vertices).float().unsqueeze(0)
-    return vertices
+# Pad or truncate vertices to ensure consistent tensor size
+max_vertices = 17664
+if vertices.shape[0] > max_vertices:
+    vertices = vertices[:max_vertices]
+else:
+    vertices = np.pad(vertices, ((0, max_vertices - vertices.shape[0]), (0, 0)), 'constant')
 
-# Inference function
-def run_inference(model, file_path):
-    vertices = preprocess_off_file(file_path)
-    with torch.no_grad():
-        predicted_image = model(vertices)
-    return predicted_image
-
-# Path to the new .off file
-new_off_file = '3D files/toilet_0443.off'
+vertices = torch.tensor(vertices).unsqueeze(0)  # Add batch dimension
 
 # Run inference
-predicted_image = run_inference(model, new_off_file)
+with torch.no_grad():
+    predicted_xy = model(vertices).squeeze(0).numpy()
 
-# Visualize the predicted 2D projection
-plt.figure(figsize=(6, 6))
-plt.imshow(predicted_image.squeeze().numpy(), cmap='gray')
-plt.title('Predicted 2D Projection')
-plt.axis('off')
+# Extract x and y coordinates from predicted_xy tensor
+x_pred = predicted_xy[:, 0]
+y_pred = predicted_xy[:, 1]
 
-# Save the figure to a file
-output_image_path = 'predicted_projection_toilet_0443.png'
-plt.savefig(output_image_path, dpi=300)
-plt.close()
-print(f"Predicted 2D projection saved to {output_image_path}")
+# Plot the 2D scatter plot of predicted x and y coordinates
+plt.figure(figsize=(10, 10))
+plt.scatter(x_pred, y_pred, s=1)
+plt.title('Predicted 2D Projection of Mesh Vertices')
+plt.xlabel('X')
+plt.ylabel('Y')
+plt.axis('equal')
+plt.savefig('predicted_2D_projection.png')  # Save the plot
+plt.show()
+
