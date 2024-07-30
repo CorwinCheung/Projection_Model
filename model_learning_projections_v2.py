@@ -16,6 +16,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import cv2
 import json
+import torch_geometric
 
 
 class MeshDataset(Dataset):
@@ -42,18 +43,20 @@ class MeshDataset(Dataset):
         mesh = trimesh.load(mesh_path)
         vertices = np.array(mesh.vertices, dtype=np.float32)
 
+        
         # Normalize vertices to range [-1, 1]
         vertices_min = vertices.min(axis=0)
         vertices_max = vertices.max(axis=0)
         vertices = 2 * (vertices - vertices_min) / (vertices_max - vertices_min) - 1
 
-        # Pad or truncate vertices to ensure consistent tensor size
+        # Convert vertices to tensor
+        vertices = torch.tensor(vertices, dtype=torch.float32)
+
+        # Pad or truncate vertices
         if vertices.shape[0] > self.max_vertices:
             vertices = vertices[:self.max_vertices]
         else:
-            vertices = np.pad(vertices, ((0, self.max_vertices - vertices.shape[0]), (0, 0)), 'constant')
-        
-        vertices = torch.tensor(vertices)
+            vertices = F.pad(vertices, (0, 0, 0, self.max_vertices - vertices.shape[0]))
         
         # Load x and y coordinates from JSON file
         with open(proj_path, 'r') as f:
@@ -66,15 +69,14 @@ class MeshDataset(Dataset):
         y_min, y_max = y.min(), y.max()
         x = 2 * (x - x_min) / (x_max - x_min) - 1
         y = 2 * (y - y_min) / (y_max - y_min) - 1 
-        # Convert x and y to a single tensor and pad/truncate to ensure consistent size
-        xy = np.stack((x, y), axis=1)
+
+        # Convert x and y to a single tensor
+        xy = torch.tensor(np.stack((x, y), axis=1), dtype=torch.float32) 
         if xy.shape[0] > self.max_points:
             xy = xy[:self.max_points]
         else:
-            xy = np.pad(xy, ((0, self.max_points - xy.shape[0]), (0, 0)), 'constant')
+            xy = F.pad(xy, (0, 0, 0, self.max_points - xy.shape[0])) 
         
-        xy = torch.tensor(xy, dtype=torch.float32)
-
         return vertices, xy
 
 
@@ -132,7 +134,7 @@ plt.title('2D Projection of Image Vertices')
 plt.xlabel('X')
 plt.ylabel('Y')
 plt.axis('equal')
-plt.show()
+#plt.show()
 
 
 # In[25]:
@@ -172,36 +174,58 @@ import torch.nn.functional as F
 import torch.optim as optim
 import matplotlib.pyplot as plt
 
-class MeshToImageNN(nn.Module):
+class MeshGNN(torch.nn.Module):
     def __init__(self, max_vertices=17664, max_points=20000):
-        super(MeshToImageNN, self).__init__()
+        super(MeshGNN, self).__init__()
         self.max_vertices = max_vertices
         self.max_points = max_points
-        self.fc1 = nn.Linear(max_vertices * 3, 4096)
-        self.fc2 = nn.Linear(4096, 1024)
-        self.fc3 = nn.Linear(1024, max_points * 2)
         
+        self.conv1 = nn.Conv1d(3, 32, kernel_size=1)
+        self.conv2 = nn.Conv1d(32, 64, kernel_size=1)
+        self.conv3 = nn.Conv1d(64, 128, kernel_size=1)
+ 
+        self.fc1 = nn.Linear(128*max_vertices, 512)
+        self.fc2 = nn.Linear(512, max_points * 2)
+    
     def forward(self, x):
-        x = x.view(-1, self.max_vertices * 3)
+        x = x.transpose(1, 2)  # (batch_size, 3, max_vertices)
+        
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+ 
+        x = x.view(x.size(0),-1)
         x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
+        x = self.fc2(x)
         x = x.view(-1, self.max_points, 2)
         return x
 
+torch.cuda.empty_cache()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = MeshToImageNN().to(device)
+model = MeshGNN().to(device)
 
 if torch.cuda.device_count() > 1:
     model = nn.DataParallel(model)
     print("Using DataParallel")
 
+import chamferdist
+
+class ChamferLoss(nn.Module):
+    def __init__(self):
+        super(ChamferLoss, self).__init__()
+        self.chamfer_dist = chamferdist.ChamferDistance()
+
+    def forward(self, pred, target):
+        dist1, dist2 = self.chamfer_dist(pred, target)
+        loss = (torch.mean(dist1) + torch.mean(dist2)) / 2.0
+        return loss
+
 # Loss and optimizer
-criterion = nn.MSELoss()
+criterion = ChamferLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
 # Training loop
-num_epochs = 50
+num_epochs = 10
 for epoch in range(num_epochs):
     print(f'Starting epoch {epoch + 1}')
     epoch_loss=0
@@ -224,14 +248,14 @@ for epoch in range(num_epochs):
 print('Training complete.')
 
 # Save the model
-torch.save(model.state_dict(), 'mesh_to_image_model.pth')
+#torch.save(model.state_dict(), 'mesh_to_image_model.pth')
 
 
 # In[32]:
 
 
 # Load the trained model for inference
-model = MeshToImageNN().to(device)
+model = MeshGNN().to(device)
 state_dict = torch.load('mesh_to_image_model.pth')
 if 'module.' in list(state_dict.keys())[0]:
     from collections import OrderedDict
@@ -253,6 +277,9 @@ vertices_min = vertices.min(axis=0)
 vertices_max = vertices.max(axis=0)
 vertices = 2 * (vertices - vertices_min) / (vertices_max - vertices_min) - 1
 
+# Convert vertices to tensor
+vertices = torch.tensor(vertices, dtype=torch.float32)
+
 # Pad or truncate vertices to ensure consistent tensor size
 max_vertices = 17664
 if vertices.shape[0] > max_vertices:
@@ -260,7 +287,8 @@ if vertices.shape[0] > max_vertices:
 else:
     vertices = np.pad(vertices, ((0, max_vertices - vertices.shape[0]), (0, 0)), 'constant')
 
-vertices = torch.tensor(vertices).unsqueeze(0).to(device)  # Add batch dimension
+# Ensure the tensor has the correct shape (batch_size, max_vertices, 3)
+vertices = torch.tensor(vertices).unsqueeze(0).to(device)
 
 # Run inference
 with torch.no_grad():
@@ -270,12 +298,6 @@ with torch.no_grad():
 x_pred = predicted_xy[:, 0]
 y_pred = predicted_xy[:, 1]
 
-x_min, x_max = x_pred.min(), x_pred.max()
-y_min, y_max = y_pred.min(), y_pred.max()
-
-x_pred = (x_pred + 1) / 2 * (x_max - x_min) + x_min
-y_pred = (y_pred + 1) / 2 * (y_max - y_min) + y_min
-
 # Plot the 2D scatter plot of predicted x and y coordinates
 plt.figure(figsize=(10, 10))
 plt.scatter(x_pred, y_pred, s=1)
@@ -283,7 +305,7 @@ plt.title('Predicted 2D Projection of Mesh Vertices')
 plt.xlabel('X')
 plt.ylabel('Y')
 plt.axis('equal')
-plt.savefig('predicted_2D_projection.png')  # Save the plot
+plt.savefig('v2_predicted_2D_projection.png')  # Save the plot
 plt.show()
 
 

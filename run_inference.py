@@ -78,6 +78,6 @@ plt.title('Predicted 2D Projection of Mesh Vertices')
 plt.xlabel('X')
 plt.ylabel('Y')
 plt.axis('equal')
-plt.savefig('predicted_2D_projection.png')  # Save the plot
+plt.savefig('predicted_projection_toilet_0443.png')  # Save the plot
 plt.show()
 
