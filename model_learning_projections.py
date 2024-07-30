@@ -42,6 +42,11 @@ class MeshDataset(Dataset):
         mesh = trimesh.load(mesh_path)
         vertices = np.array(mesh.vertices, dtype=np.float32)
 
+        # Normalize vertices to range [-1, 1]
+        vertices_min = vertices.min(axis=0)
+        vertices_max = vertices.max(axis=0)
+        vertices = 2 * (vertices - vertices_min) / (vertices_max - vertices_min) - 1
+
         # Pad or truncate vertices to ensure consistent tensor size
         if vertices.shape[0] > self.max_vertices:
             vertices = vertices[:self.max_vertices]
@@ -56,6 +61,11 @@ class MeshDataset(Dataset):
         x = np.array(projection_data['x'])
         y = np.array(projection_data['y'])
         
+        # Normalize xy to range [-1, 1]
+        x_min, x_max = x.min(), x.max()
+        y_min, y_max = y.min(), y.max()
+        x = 2 * (x - x_min) / (x_max - x_min) - 1
+        y = 2 * (y - y_min) / (y_max - y_min) - 1 
         # Convert x and y to a single tensor and pad/truncate to ensure consistent size
         xy = np.stack((x, y), axis=1)
         if xy.shape[0] > self.max_points:
@@ -86,7 +96,6 @@ dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
 
 print(dataset)
 print(dataloader)
-
 
 # In[23]:
 
@@ -185,33 +194,19 @@ model = MeshToImageNN().to(device)
 
 if torch.cuda.device_count() > 1:
     model = nn.DataParallel(model)
-
-
-# In[28]:
-
+    print("Using DataParallel")
 
 # Loss and optimizer
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-# Dataset and DataLoader setup
-mesh_dir = '3D files'
-proj_dir = '2D projections'
-
-# Transform for images (if needed)
-transform = transforms.Compose([
-    transforms.Resize((256, 256)),
-    transforms.ToTensor()
-])
-
-# Dataset and DataLoader
-dataset = MeshDataset(mesh_dir, proj_dir, transform=transform)
-dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
-
 # Training loop
-num_epochs = 1
+num_epochs = 5
 for epoch in range(num_epochs):
+    print(f'Starting epoch {epoch + 1}')
+    epoch_loss=0
     for i, (vertices, xy) in enumerate(dataloader):
+        print(f'Processing batch {i + 1}')  # Debug print
         vertices = vertices.to(device)
         xy = xy.to(device)
         optimizer.zero_grad()
@@ -220,8 +215,12 @@ for epoch in range(num_epochs):
         loss.backward()
         optimizer.step()
         
-        if (i + 1) % 10 == 0:
+        epoch_loss += loss.item()
+
+        if (i + 1) % 4 == 0:
             print(f'Epoch [{epoch + 1}/{num_epochs}], Step [{i + 1}/{len(dataloader)}], Loss: {loss.item():.4f}')
+    avg_loss = epoch_loss / len(dataloader)
+    print(f'Epoch [{epoch + 1}/{num_epochs}], Average Loss: {avg_loss:.4f}')
 
 print('Training complete.')
 
@@ -233,15 +232,27 @@ torch.save(model.state_dict(), 'mesh_to_image_model.pth')
 
 
 # Load the trained model for inference
-device = "cpu"
 model = MeshToImageNN().to(device)
-model.load_state_dict(torch.load('mesh_to_image_model.pth'))
+state_dict = torch.load('mesh_to_image_model.pth')
+if 'module.' in list(state_dict.keys())[0]:
+    from collections import OrderedDict
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        name = k[7:]  # remove `module.`
+        new_state_dict[name] = v
+    model.load_state_dict(new_state_dict)
+else:
+    model.load_state_dict(state_dict)
 model.eval()
 
-# Load the test mesh
 test_mesh_path = 'Test Set/3D files/toilet_0443.off'
 test_mesh = trimesh.load(test_mesh_path)
 vertices = np.array(test_mesh.vertices, dtype=np.float32)
+
+# Normalize vertices to range [-1, 1]
+vertices_min = vertices.min(axis=0)
+vertices_max = vertices.max(axis=0)
+vertices = 2 * (vertices - vertices_min) / (vertices_max - vertices_min) - 1
 
 # Pad or truncate vertices to ensure consistent tensor size
 max_vertices = 17664
@@ -250,15 +261,21 @@ if vertices.shape[0] > max_vertices:
 else:
     vertices = np.pad(vertices, ((0, max_vertices - vertices.shape[0]), (0, 0)), 'constant')
 
-vertices = torch.tensor(vertices).unsqueeze(0)  # Add batch dimension
+vertices = torch.tensor(vertices).unsqueeze(0).to(device)  # Add batch dimension
 
 # Run inference
 with torch.no_grad():
-    predicted_xy = model(vertices).squeeze(0).numpy()
+    predicted_xy = model(vertices).squeeze(0).cpu().numpy()
 
 # Extract x and y coordinates from predicted_xy tensor
 x_pred = predicted_xy[:, 0]
 y_pred = predicted_xy[:, 1]
+
+x_min, x_max = x_pred.min(), x_pred.max()
+y_min, y_max = y_pred.min(), y_pred.max()
+
+x_pred = (x_pred + 1) / 2 * (x_max - x_min) + x_min
+y_pred = (y_pred + 1) / 2 * (y_max - y_min) + y_min
 
 # Plot the 2D scatter plot of predicted x and y coordinates
 plt.figure(figsize=(10, 10))

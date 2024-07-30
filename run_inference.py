@@ -37,7 +37,16 @@ if torch.cuda.device_count() > 1:
 
 # Load the trained model for inference
 model = MeshToImageNN().to(device)
-model.load_state_dict(torch.load('mesh_to_image_model.pth'))
+state_dict = torch.load('mesh_to_image_model.pth')
+if 'module.' in list(state_dict.keys())[0]:
+    from collections import OrderedDict
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        name = k[7:]  # remove `module.`
+        new_state_dict[name] = v
+    model.load_state_dict(new_state_dict)
+else:
+    model.load_state_dict(state_dict)
 model.eval()
 
 # Load the test mesh
@@ -52,11 +61,11 @@ if vertices.shape[0] > max_vertices:
 else:
     vertices = np.pad(vertices, ((0, max_vertices - vertices.shape[0]), (0, 0)), 'constant')
 
-vertices = torch.tensor(vertices).unsqueeze(0)  # Add batch dimension
+vertices = torch.tensor(vertices).unsqueeze(0).to(device)  # Add batch dimension
 
 # Run inference
 with torch.no_grad():
-    predicted_xy = model(vertices).squeeze(0).numpy()
+    predicted_xy = model(vertices).squeeze(0).cpu().numpy()
 
 # Extract x and y coordinates from predicted_xy tensor
 x_pred = predicted_xy[:, 0]
